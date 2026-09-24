@@ -13,6 +13,7 @@ import importlib
 from collections.abc import Mapping
 from collections import Counter
 import json
+from dataset import load_codebook_rows
 
 VALID_QUANT_METHODS = {"rkmeans", "rvq", "rqvae", "opq", "pq", 'vqvae', 'mm_rqvae'}
 
@@ -60,7 +61,15 @@ def _load_quant_details(path: str, quant_method: str) -> dict:
     return mp
 
 
-def load_and_process_config(model_name: str, dataset_name: str, quant_method: str, embedding_modality: str = 'text') -> dict:
+def load_and_process_config(
+    model_name: str,
+    dataset_name: str,
+    quant_method: str,
+    embedding_modality: str = "text",
+    codebook_path_override: str | None = None,
+    run_name: str | None = None,
+    has_dup_layer_override: bool | None = None,
+) -> dict:
     """
     通用配置加载器 (V6 - 支援 base.yaml 繼承與覆蓋)。
     """
@@ -106,6 +115,8 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     }
     dataset_root = Path(paths['dataset_root'].format(**format_args))
     output_root = Path(paths['output_root'].format(**format_args))
+    if run_name:
+        output_root /= run_name
 
         # === 4. 自动构造 codebook 路径 ===
     dataset_root = Path(f"../datasets/{dataset_name}")
@@ -115,7 +126,11 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     quant_tag = config['quant_method'].lower()
 
     # 严格匹配指定模态和量化方法
-    codebook_path = codebook_dir / f"{dataset_name}.{mod_tag}.{quant_tag}.npy"
+    codebook_path = (
+        Path(codebook_path_override)
+        if codebook_path_override
+        else codebook_dir / f"{dataset_name}.{mod_tag}.{quant_tag}.npy"
+    )
 
     if not codebook_path.exists():
         raise FileNotFoundError(
@@ -140,7 +155,11 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     # === 4. 根據載入的量化細節，計算詞表參數 ===
     K = int(quant_details['codebook_size'])
     num_semantic_levels = int(quant_details['num_levels'])
-    has_dup_layer = quant_details.get('has_dup_layer', True) 
+    has_dup_layer = (
+        has_dup_layer_override
+        if has_dup_layer_override is not None
+        else quant_details.get("has_dup_layer", True)
+    )
     
     config['codebook_size'] = K
     config['num_semantic_levels'] = num_semantic_levels
@@ -148,18 +167,32 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     # === 5. 校验 codebook 檔案 ===
     if not Path(config['code_path']).is_file():
         raise FileNotFoundError(f"[FATAL] 未找到 codebook: {config['code_path']}")
-    codes_arr = np.load(config['code_path'], allow_pickle=True)
-    codes_mat = np.vstack(codes_arr) if codes_arr.dtype == object else codes_arr
-    
+    code_rows = load_codebook_rows(config["code_path"])
     expected_code_len = num_semantic_levels + 1 if has_dup_layer else num_semantic_levels
-    config['code_len'] = expected_code_len
-
-    if codes_mat.ndim != 2 or codes_mat.shape[1] != expected_code_len:
-        raise ValueError(f"[FATAL] Codebook {config['code_path']} 的期望形状為 (N, {expected_code_len})，實際為 {codes_mat.shape}")
+    code_lengths = {len(row) for row in code_rows}
+    if max(code_lengths) > expected_code_len:
+        raise ValueError(
+            f"[FATAL] Codebook {config['code_path']} contains an SID longer than the "
+            f"quantizer's {expected_code_len} configured levels."
+        )
+    if len(code_lengths) == 1 and next(iter(code_lengths)) != expected_code_len:
+        raise ValueError(
+            f"[FATAL] Fixed-length codebook {config['code_path']} must contain "
+            f"{expected_code_len} SID levels, but contains {next(iter(code_lengths))}."
+        )
+    config["code_len"] = expected_code_len
+    config["max_code_len"] = max(code_lengths)
+    config["min_code_len"] = min(code_lengths)
+    config["variable_length_sids"] = len(code_lengths) > 1
 
     # === 6. 計算最終詞表參數 ===
     if has_dup_layer:
-        dup_max = int(codes_mat[:, -1].max()) if codes_mat.size > 0 else 0
+        if any(len(row) != expected_code_len for row in code_rows):
+            raise ValueError(
+                "Variable-length codebooks cannot use a trailing deduplication layer. "
+                "Use SID-to-items collision handling instead."
+            )
+        dup_max = max(row[-1] for row in code_rows)
         dup_vocab_size = dup_max + 1
         config['dup_vocab_size'] = dup_vocab_size
         vocab_sizes = [K] * num_semantic_levels + [dup_vocab_size]

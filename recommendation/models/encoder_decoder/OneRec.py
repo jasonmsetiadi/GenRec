@@ -16,7 +16,7 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 from recommendation.metrics import recall_at_k, ndcg_at_k
-from recommendation.models.generation.prefix_tree import Trie
+from recommendation.models.generation.prefix_tree import Trie, calculate_sid_pos_index
 from recommendation.models.abstract_model import AbstractModel
 
 logger = logging.getLogger(__name__)
@@ -237,7 +237,7 @@ class OneRec(AbstractModel):
         """
         eval_params = self.cfg["evaluation_params"]
         beam_size = eval_params["beam_size"]
-        code_len = self.cfg["code_len"]
+        max_code_len = self.cfg["max_code_len"]
 
         input_ids = batch["input_ids"]      # (B, L_in)
         attention_mask = batch["attention_mask"]
@@ -251,17 +251,23 @@ class OneRec(AbstractModel):
                 attention_mask=attention_mask,
                 num_beams=beam_size,
                 num_return_sequences=beam_size,
-                max_new_tokens=code_len,
+                max_new_tokens=max_code_len + 1,
                 length_penalty=eval_params.get("length_penalty", 1.0),
                 early_stopping=eval_params.get("early_stopping", True),
             )
 
-        # 假设 decoder_start_token_id = 0，去掉第一个 start token，只取接下来的 code_len 位
-        preds = preds[:, 1 : 1 + code_len]  # (B * beam_size, code_len)
+        # Remove decoder start token; EOS terminates variable-length SIDs.
+        preds = preds[:, 1:]
         preds = preds.view(batch_size, beam_size, -1)  # (B, beam_size, L_pred)
 
         # 计算每个样本的“正确位置索引矩阵” (B, beam_size)
-        pos_index = self._calculate_pos_index(preds, labels, maxk=beam_size).to(device)
+        pos_index = calculate_sid_pos_index(
+            preds,
+            labels,
+            self.cfg["token_params"]["eos_token_id"],
+            self.cfg["token_params"]["pad_token_id"],
+            beam_size,
+        ).to(device)
 
         batch_metrics: Dict[str, float] = {"count": float(batch_size)}
         for k in topk_list:

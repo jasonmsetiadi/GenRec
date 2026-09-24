@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from metrics import recall_at_k, ndcg_at_k
 from tokenizer import build_semantic_special_tokens
+from recommendation.models.generation.prefix_tree import calculate_sid_pos_index
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class LCRec(AbstractModel):
         if num_added_tokens > 0:
             self.model.resize_token_embeddings(len(self.tokenizer))
 
-        self.code_len = config["code_len"]
+        self.max_code_len = config["max_code_len"]
         self.beam_size = config["evaluation_params"]["beam_size"]
         self.item_to_code_map = item_to_code_map
         self.semantic_prefix_trie = self._build_semantic_prefix_trie()
@@ -96,13 +97,11 @@ class LCRec(AbstractModel):
             trie.setdefault(prefix, set()).add(self.tokenizer.eos_token_id)
         return {key: sorted(value) for key, value in trie.items()}
 
-    def _prefix_allowed_tokens_fn(self, prompt_lengths: List[int]):
-        batch_size = len(prompt_lengths)
+    def _prefix_allowed_tokens_fn(self, prompt_width: int):
         eos_token_id = self.tokenizer.eos_token_id
 
         def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.Tensor) -> List[int]:
-            prompt_len = prompt_lengths[batch_id % batch_size]
-            generated_prefix = tuple(input_ids.tolist()[prompt_len:])
+            generated_prefix = tuple(input_ids.tolist()[prompt_width:])
             return self.semantic_prefix_trie.get(generated_prefix, [eos_token_id])
 
         return prefix_allowed_tokens_fn
@@ -134,31 +133,28 @@ class LCRec(AbstractModel):
         target_token_ids = batch["target_token_ids"]
         batch_size = input_ids.size(0)
 
-        prompt_lengths = attention_mask.sum(dim=1).tolist()
-        prefix_allowed_tokens_fn = self._prefix_allowed_tokens_fn(prompt_lengths)
+        prefix_allowed_tokens_fn = self._prefix_allowed_tokens_fn(input_ids.shape[1])
 
         outputs = self.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
             num_beams=self.beam_size,
             num_return_sequences=self.beam_size,
-            max_new_tokens=self.code_len + 1,
+            max_new_tokens=self.max_code_len + 1,
             prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
         )
 
         generated = outputs[:, input_ids.shape[1]:]
-        if generated.size(1) < self.code_len:
-            padding = torch.full(
-                (generated.size(0), self.code_len - generated.size(1)),
-                fill_value=-1,
-                dtype=generated.dtype,
-                device=generated.device,
-            )
-            generated = torch.cat([generated, padding], dim=1)
-        generated = generated[:, : self.code_len]
-        generated = generated.view(batch_size, self.beam_size, self.code_len)
+        generated = generated.view(batch_size, self.beam_size, -1)
 
-        pos_index = self._calculate_pos_index(generated, target_token_ids, self.beam_size)
+        labels = target_token_ids.masked_fill(target_token_ids == -1, -100)
+        pos_index = calculate_sid_pos_index(
+            generated,
+            labels,
+            self.tokenizer.eos_token_id,
+            self.tokenizer.pad_token_id,
+            self.beam_size,
+        )
         metrics: Dict[str, float] = {"count": float(batch_size)}
         for k in topk_list:
             metrics[f"Recall@{k}"] = recall_at_k(pos_index, k).sum().item()

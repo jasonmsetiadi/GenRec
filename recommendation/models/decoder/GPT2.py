@@ -9,6 +9,7 @@ from pathlib import Path
 # 確保 metrics 模組可以被正確導入
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from metrics import recall_at_k, ndcg_at_k
+from recommendation.models.generation.prefix_tree import Trie, calculate_sid_pos_index
 
 # 從 transformers 導入 GPT-2 相關的配置和模型
 GPT2Config = transformers.GPT2Config
@@ -19,7 +20,7 @@ class GPT2(AbstractModel):
     一個仿照 TIGER 介面的 Decoder-Only 生成式模型。
     它使用 GPT-2 架構從零開始訓練，專用於序列推薦任務。
     """
-    def __init__(self, config: Dict[str, Any], **kwargs):
+    def __init__(self, config: Dict[str, Any], prefix_trie: Trie | None = None, **kwargs):
         super().__init__(config)
         
         model_params = config['model_params']
@@ -29,7 +30,7 @@ class GPT2(AbstractModel):
         gpt2config = GPT2Config(
             vocab_size=token_params['vocab_size'],
             # 總長度 = 歷史最大長度 + 目標 code 長度
-            n_positions=model_params['max_len'] * config['code_len'] + config['code_len'],
+            n_positions=model_params['max_len'] * config['max_code_len'] + config['max_code_len'] + 1,
             n_embd=model_params['n_embd'],
             n_layer=model_params['n_layer'],
             n_head=model_params['n_head'],
@@ -47,6 +48,7 @@ class GPT2(AbstractModel):
 
         # 2. 實例化 GPT2LMHeadModel (for Language Modeling)
         self.gpt2 = GPT2LMHeadModel(config=gpt2config)
+        self.prefix_trie = prefix_trie
         self.n_params_str = self._calculate_n_parameters()
 
     @property
@@ -73,14 +75,15 @@ class GPT2(AbstractModel):
         核心思想：将 history 和 labels 拼接成一个长序列进行自回归训练。
         """
         history_ids = batch['input_ids']      # (B, L_hist_flat)
-        target_ids = batch['labels']          # (B, L_target)
+        target_labels = batch['labels']       # (B, L_target), padded with -100
         history_mask = batch['attention_mask'] # (B, L_hist_flat)
+        target_mask = (target_labels != -100).long()
+        target_ids = target_labels.masked_fill(target_labels == -100, self.config["token_params"]["pad_token_id"])
         
         # 1. 拼接输入序列: [history_tokens, target_tokens]
         combined_ids = torch.cat([history_ids, target_ids], dim=1)
         
         # 2. 创建拼接后的 attention mask
-        target_mask = torch.ones_like(target_ids)
         combined_mask = torch.cat([history_mask, target_mask], dim=1)
 
         # 3. ✅ 【关键修正】创建用于计算 loss 的 labels
@@ -117,7 +120,7 @@ class GPT2(AbstractModel):
         以配合 trainer.py 中的正确平均值计算。
         """
         beam_size = self.config['evaluation_params']['beam_size']
-        code_len = self.config['code_len']
+        max_code_len = self.config['max_code_len']
 
         input_ids = batch['input_ids']
         attention_mask = batch['attention_mask']
@@ -133,10 +136,11 @@ class GPT2(AbstractModel):
             attention_mask=attention_mask,
             num_beams=beam_size,
             num_return_sequences=beam_size,
-            max_new_tokens=code_len,
-            early_stopping=False,
+            max_new_tokens=max_code_len + 1,
+            early_stopping=True,
             pad_token_id=self.config['token_params']['pad_token_id'],
-            eos_token_id=None
+            eos_token_id=self.config['token_params']['eos_token_id'],
+            prefix_allowed_tokens_fn=self._prefix_allowed_tokens_fn(input_ids.shape[1]),
         )
         
         # 2. 后处理 (不变)
@@ -144,7 +148,13 @@ class GPT2(AbstractModel):
         preds_reshaped = generated_part.view(batch_size, beam_size, -1)
         
         # 3. 计算命中 (不变)
-        pos_index = self._calculate_pos_index(preds_reshaped, labels, maxk=beam_size)
+        pos_index = calculate_sid_pos_index(
+            preds_reshaped,
+            labels,
+            self.config["token_params"]["eos_token_id"],
+            self.config["token_params"]["pad_token_id"],
+            beam_size,
+        )
         # pos_index 不需要移动到 device，因为它是在 CPU 上计算并用于后续 CPU 计算的
         
         # 4. 计算指标总和
@@ -164,6 +174,15 @@ class GPT2(AbstractModel):
           
         # 返回包含 count 和 指标总和 的字典
         return batch_metrics
+
+    def _prefix_allowed_tokens_fn(self, prompt_width: int):
+        if self.prefix_trie is None:
+            return None
+
+        def allowed_tokens(_batch_id, generated_ids):
+            return self.prefix_trie.allowed_tokens(generated_ids.tolist()[prompt_width:])
+
+        return allowed_tokens
   
     @staticmethod
     def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor, maxk: int) -> torch.Tensor:
@@ -199,4 +218,3 @@ class GPT2(AbstractModel):
                     pos_index[i, j] = True
                     break
         return pos_index
-

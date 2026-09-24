@@ -13,7 +13,7 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 from recommendation.metrics import recall_at_k, ndcg_at_k
-from recommendation.models.generation.prefix_tree import Trie
+from recommendation.models.generation.prefix_tree import Trie, calculate_sid_pos_index
 from recommendation.models.abstract_model import AbstractModel
 
 
@@ -111,7 +111,7 @@ class TIGER(AbstractModel):
     """
     # 从 config 中获取评估参数
     beam_size = self.config['evaluation_params']['beam_size']
-    code_len = self.config['code_len']
+    max_code_len = self.config['max_code_len']
 
     input_ids, attention_mask, labels = batch['input_ids'], batch['attention_mask'], batch['labels']
     device = input_ids.device
@@ -123,14 +123,20 @@ class TIGER(AbstractModel):
     preds = self.generate(
         input_ids=input_ids, attention_mask=attention_mask,
         num_beams=beam_size, num_return_sequences=beam_size,
-        max_new_tokens=code_len, early_stopping=False
+        max_new_tokens=max_code_len + 1, early_stopping=True
     )
     
     # 2. 后处理
-    preds = preds[:, 1:1 + code_len].view(batch_size, beam_size, -1)
+    preds = preds[:, 1:].view(batch_size, beam_size, -1)
     
     # 3. 计算命中 (专属逻辑)
-    pos_index = self._calculate_pos_index(preds, labels, maxk=beam_size).to(device)
+    pos_index = calculate_sid_pos_index(
+        preds,
+        labels,
+        self.config["token_params"]["eos_token_id"],
+        self.config["token_params"]["pad_token_id"],
+        beam_size,
+    ).to(device)
 
     # 4. 计算指标 (通用逻辑)
     batch_metrics = {}

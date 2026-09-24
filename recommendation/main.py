@@ -41,6 +41,23 @@ def main():
     parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rkmeans', 'rvq', 'rqvae', 'opq', 'pq', 'vqvae', 'mm_rqvae'], help='量化方法')
     parser.add_argument('--embedding_modality', type=str, default='text', choices=['text', 'image', 'fused', 'lfused', 'cf'], help='量化模态类型，对应不同的 codebook (默认 text)')
     parser.add_argument('--eval_only', action='store_true', help='仅加载已有模型，在测试集上直接评估')
+    parser.add_argument(
+        "--codebook_path",
+        type=str,
+        default=None,
+        help="Override the derived codebook path; use this for a variable-length SID codebook.",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Append a name to the checkpoint/log directory to keep comparison runs separate.",
+    )
+    parser.add_argument(
+        "--no_dedup_layer",
+        action="store_true",
+        help="Declare that the selected codebook has no trailing fixed deduplication level.",
+    )
 
     
     # ✅ (已移除) 删除了 --no_trie 命令行参数
@@ -54,7 +71,10 @@ def main():
         args.model, 
         args.dataset, 
         args.quant_method,
-        embedding_modality=args.embedding_modality
+        embedding_modality=args.embedding_modality,
+        codebook_path_override=args.codebook_path,
+        run_name=args.run_name,
+        has_dup_layer_override=False if args.no_dedup_layer else None,
     )
     ckpt_override = config['save_path']
     print(f"ckpt_override: {ckpt_override}") 
@@ -107,10 +127,16 @@ def main():
     
     # 检查 config['evaluation_params'] 中的 'use_prefix_trie' 标志
     # 默认值为 False (如果您希望默认不使用)
-    use_trie = config.get('evaluation_params', {}).get('use_prefix_trie', False) 
+    use_trie = (
+        config.get("evaluation_params", {}).get("use_prefix_trie", False)
+        or config["variable_length_sids"]
+    )
     
     if use_trie and build_trie_from_codebook is not None:
-        logging.info("Building Prefix Trie (enabled in config)...")
+        logging.info(
+            "Building Prefix Trie (%s)...",
+            "required for variable-length SIDs" if config["variable_length_sids"] else "enabled in config",
+        )
         
         # 获取所有合法的 code token 序列
         all_token_sequences = list(item_to_code_map.values())

@@ -30,7 +30,8 @@ class BaseTokenizer:
         self.mask_token_id = config['token_params'].get('mask_token_id')
         self.cls_token_id = config['token_params'].get('cls_token_id')
         self.sep_token_id = config['token_params'].get('sep_token_id')
-        self.code_len = config['code_len']
+        self.code_len = config['max_code_len']
+        self.eos_token_id = config['token_params']['eos_token_id']
         self.item_pad_id = 0 
         self.code_pad_list = [self.pad_token_id] * self.code_len
         self.max_len = config['model_params']['max_len']
@@ -177,7 +178,7 @@ class GenerativeTokenizer(BaseTokenizer):
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         
         batch_sequences_flat_valid = [] # 存儲每個樣本壓平後的 *有效* code token
-        target_codes = []
+        target_sequences = []
 
         logger.debug(f"--- Tokenizer Start Batch (Size: {len(batch)}) ---") 
 
@@ -204,8 +205,10 @@ class GenerativeTokenizer(BaseTokenizer):
             batch_sequences_flat_valid.append(torch.tensor(seq_flat_valid, dtype=torch.long))
 
             # Target (保持不變)
-            t_code = self.item_to_code_map.get(tgt_id_0based + 1, self.code_pad_list)
-            target_codes.append(t_code)
+            target_code = self.item_to_code_map.get(tgt_id_0based + 1)
+            if target_code is None:
+                raise KeyError(f"Target item {tgt_id_0based} has no SID in the codebook.")
+            target_sequences.append(torch.tensor(target_code + [self.eos_token_id], dtype=torch.long))
 
         # 4. ✅ 對壓平後的 *有效* 序列進行 Padding (使用修正後的函數)
         padded_histories = self._pad_sequences(
@@ -224,8 +227,12 @@ class GenerativeTokenizer(BaseTokenizer):
             logger.debug(f"Attention Mask[0] (first 30): {attention_masks[0][:30].tolist()}") 
             logger.debug(f"Attention Mask[0] (last 30): {attention_masks[0][-30:].tolist()}") 
         
-        # 6. Target Tensor (保持不變)
-        target_codes_tensor = torch.tensor(target_codes, dtype=torch.long)
+        # Target labels include EOS and use -100 so seq2seq and causal losses ignore padding.
+        target_codes_tensor = pad_sequence(
+            target_sequences,
+            batch_first=True,
+            padding_value=-100,
+        )
         
         logger.debug(f"--- Tokenizer End Batch ---") 
 
@@ -436,9 +443,10 @@ class LCRecTokenizer(BaseTokenizer):
             padding_value=self.llm_tokenizer.pad_token_id,
         )
         attention_mask = (input_ids != self.llm_tokenizer.pad_token_id).long()
-        target_token_ids = torch.stack(
+        target_token_ids = pad_sequence(
             [feature["target_token_ids"] for feature in eval_features],
-            dim=0,
+            batch_first=True,
+            padding_value=-1,
         )
         target_item_ids = torch.stack(
             [feature["target_item_id"] for feature in eval_features],

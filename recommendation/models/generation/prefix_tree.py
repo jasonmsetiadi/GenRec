@@ -147,6 +147,10 @@ class Trie:
 
         return allowed
 
+    def allowed_tokens(self, prefix: Sequence[int]) -> List[int]:
+        """Return the valid continuation tokens for an SID prefix."""
+        return self._lookup(tuple(int(token) for token in prefix))
+
     def get_allowed_next_tokens(self, batch_id: int, input_ids) -> List[int]:
         """
         核心接口：给 Transformers generate(prefix_allowed_tokens_fn=...) 用。
@@ -191,3 +195,47 @@ def build_trie_from_codebook(
     )
     trie.bulk_insert(token_sequences)
     return trie
+
+
+def trim_sid_tokens(
+    sequence: Sequence[int],
+    eos_token_id: Optional[int],
+    pad_token_id: int = 0,
+    ignored_token_id: int = -100,
+) -> Tuple[int, ...]:
+    """Remove target padding and the optional terminal token from an SID sequence."""
+    trimmed: List[int] = []
+    for token in sequence:
+        token = int(token)
+        if token in (pad_token_id, ignored_token_id):
+            break
+        if eos_token_id is not None and token == eos_token_id:
+            break
+        trimmed.append(token)
+    return tuple(trimmed)
+
+
+def calculate_sid_pos_index(
+    preds,
+    labels,
+    eos_token_id: Optional[int],
+    pad_token_id: int,
+    maxk: int,
+):
+    """Return first-hit positions for padded, EOS-terminated SID candidates."""
+    import torch
+
+    preds = preds.detach().cpu()
+    labels = labels.detach().cpu()
+    batch_size, beam_size, _ = preds.shape
+    pos_index = torch.zeros((batch_size, maxk), dtype=torch.bool)
+    for batch_idx in range(batch_size):
+        target = trim_sid_tokens(labels[batch_idx].tolist(), eos_token_id, pad_token_id)
+        for beam_idx in range(min(beam_size, maxk)):
+            candidate = trim_sid_tokens(
+                preds[batch_idx, beam_idx].tolist(), eos_token_id, pad_token_id
+            )
+            if candidate == target:
+                pos_index[batch_idx, beam_idx] = True
+                break
+    return pos_index

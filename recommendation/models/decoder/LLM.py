@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from metrics import recall_at_k, ndcg_at_k
+from recommendation.models.generation.prefix_tree import Trie, calculate_sid_pos_index
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class LLM(AbstractModel):
     使用預訓練 Decoder-Only LLM 架構 (如 Llama, Qwen)，但拋棄其原始 Embedding，
     直接使用 Code Token Offset ID 作為輸入，訓練一個新的 Embedding 層。
     """
-    def __init__(self, config: Dict[str, Any], **kwargs):
+    def __init__(self, config: Dict[str, Any], prefix_trie: Trie | None = None, **kwargs):
         super().__init__(config)
         
         model_params = config['model_params']
@@ -61,7 +62,8 @@ class LLM(AbstractModel):
         self._eos_id = token_params['eos_token_id']
 
         self.n_params_str = self._calculate_n_parameters()
-        self.code_len = config['code_len']
+        self.max_code_len = config["max_code_len"]
+        self.prefix_trie = prefix_trie
 
     @property
     def task_type(self) -> str:
@@ -84,19 +86,21 @@ class LLM(AbstractModel):
         處理方式與 SIMPLE_GPT 完全相同。
         """
         history_ids = batch['input_ids']      # (B, L_hist_flat) - Offset IDs
-        target_ids = batch['labels']        # (B, L_target) - Offset IDs
+        target_labels = batch["labels"]     # (B, L_target), padded with -100
         history_mask = batch['attention_mask'] # (B, L_hist_flat) - Token-level mask
+        target_mask = (target_labels != -100).long()
+        target_ids = target_labels.masked_fill(target_labels == -100, self._pad_id)
         
         # 1. 拼接輸入序列
         combined_ids = torch.cat([history_ids, target_ids], dim=1)
         
         # 2. 創建拼接後的 attention mask
-        target_mask = torch.ones_like(target_ids)
         combined_mask = torch.cat([history_mask, target_mask], dim=1)
 
         # 3. 創建用於計算 loss 的 labels
         history_labels = torch.full_like(history_ids, -100)
-        combined_labels = torch.cat([history_labels, target_ids], dim=1)
+        target_loss_labels = target_ids.masked_fill(target_mask == 0, -100)
+        combined_labels = torch.cat([history_labels, target_loss_labels], dim=1)
 
         # 4. 傳給 LLM 模型 (現在它接收的是 Offset IDs)
         outputs = self.llm(
@@ -119,7 +123,7 @@ class LLM(AbstractModel):
         評估邏輯與 SIMPLE_GPT 完全相同。
         """
         beam_size = self.config['evaluation_params']['beam_size']
-        code_len = self.code_len
+        max_code_len = self.max_code_len
 
         input_ids = batch['input_ids']         # History Offset IDs
         attention_mask = batch['attention_mask'] # History Token-level Mask
@@ -132,8 +136,9 @@ class LLM(AbstractModel):
             attention_mask=attention_mask,
             num_beams=beam_size,
             num_return_sequences=beam_size,
-            max_new_tokens=code_len,
-            early_stopping=False,
+            max_new_tokens=max_code_len + 1,
+            early_stopping=True,
+            prefix_allowed_tokens_fn=self._prefix_allowed_tokens_fn(input_ids.shape[1]),
         )
         
         # 2. 後處理 (切掉 prompt 部分)
@@ -141,18 +146,31 @@ class LLM(AbstractModel):
         preds_reshaped = generated_part.view(input_ids.shape[0], beam_size, -1)
         
         # 3. 計算命中 (直接使用 Offset IDs)
-        pos_index = self._calculate_pos_index(preds_reshaped, labels, maxk=beam_size)
+        pos_index = calculate_sid_pos_index(
+            preds_reshaped,
+            labels,
+            self._eos_id,
+            self._pad_id,
+            beam_size,
+        )
         pos_index = pos_index.to(device)
         
-        # 4. 計算指標
-        batch_metrics = {}
+        # 4. Return metric sums so the generic trainer can aggregate correctly.
+        batch_metrics = {"count": float(input_ids.shape[0])}
         for k in topk_list:
-            recall = recall_at_k(pos_index, k).mean().item()
-            ndcg = ndcg_at_k(pos_index, k).mean().item()
-            batch_metrics[f'Recall@{k}'] = recall
-            batch_metrics[f'NDCG@{k}'] = ndcg
+            batch_metrics[f'Recall@{k}'] = recall_at_k(pos_index, k).sum().item()
+            batch_metrics[f'NDCG@{k}'] = ndcg_at_k(pos_index, k).sum().item()
             
         return batch_metrics
+
+    def _prefix_allowed_tokens_fn(self, prompt_width: int):
+        if self.prefix_trie is None:
+            return None
+
+        def allowed_tokens(_batch_id, generated_ids):
+            return self.prefix_trie.allowed_tokens(generated_ids.tolist()[prompt_width:])
+
+        return allowed_tokens
   
     # _calculate_pos_index 可以保持與 TIGER 一致 (假設有 dup 層)
     @staticmethod

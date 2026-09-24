@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,18 +13,36 @@ def pad_or_truncate(sequence, max_len, PAD_TOKEN=0):
     return [PAD_TOKEN] * (max_len - len(sequence)) + sequence
 
 
-def item2code(code_path, vocab_sizes, bases):
+def load_codebook_rows(code_path: str) -> List[List[int]]:
     data = np.load(code_path, allow_pickle=True)
-    mat = np.vstack(data) if data.dtype == object else data
+    if data.ndim == 1 and data.dtype == object:
+        rows = [np.asarray(row).reshape(-1).tolist() for row in data]
+    elif data.ndim == 2:
+        rows = data.tolist()
+    else:
+        raise ValueError(
+            "Codebook must be a rectangular 2D array or a 1D object array of SID rows; "
+            f"got shape={data.shape}, dtype={data.dtype}."
+        )
+    if not rows or any(not row for row in rows):
+        raise ValueError("Codebook must contain at least one non-empty SID for every item.")
+    return [[int(code) for code in row] for row in rows]
+
+
+def item2code(code_path, vocab_sizes, bases):
+    rows = load_codebook_rows(code_path)
 
     num_levels = len(vocab_sizes)
-    assert mat.shape[1] == num_levels, f"Expect {num_levels} columns in codebook, got {mat.shape[1]}"
 
     item_to_code = {}
     code_to_item = {}
 
-    for index, row in enumerate(mat):
-        code_values = [int(c) for c in row]
+    for index, code_values in enumerate(rows):
+        if len(code_values) > num_levels:
+            raise ValueError(
+                f"SID at index {index} has {len(code_values)} levels, but the quantizer "
+                f"defines only {num_levels}."
+            )
         for i, code_val in enumerate(code_values):
             if not (0 <= code_val < vocab_sizes[i]):
                 raise ValueError(
@@ -37,6 +55,10 @@ def item2code(code_path, vocab_sizes, bases):
         code_to_item[tuple(tokens)] = item_id
 
     return item_to_code, code_to_item
+
+
+def sid_lengths(item_to_code_map: Dict[int, Sequence[int]]) -> List[int]:
+    return [len(code) for code in item_to_code_map.values()]
 
 
 def process_parquet(file_path, mode, max_len, PAD_TOKEN=0):
