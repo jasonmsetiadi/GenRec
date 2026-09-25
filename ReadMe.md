@@ -106,7 +106,7 @@ For the documented `Musical_Instruments` text-embedding path, run the complete
 download, preprocessing, embedding, and quantization sequence with:
 
 ```bash
-bash run_musical_instruments_pipeline.sh
+bash run_preprocessing_pipeline.sh
 ```
 
 The runner uses the local `sentence-transformers/sentence-t5-base` model. Set
@@ -114,7 +114,12 @@ The runner uses the local `sentence-transformers/sentence-t5-base` model. Set
 as `sentence-transformers/gtr-t5-xl`. Set `INSTALL_DEPS=1` to install
 `requirements.txt` first. Models download from Hugging Face by default; set
 `HF_ENDPOINT` before running the script only when an accessible compatible
-mirror is required.
+mirror is required. Add Amazon dataset names to the `DATASETS` Bash array in
+the script, or supply them as arguments:
+
+```bash
+bash run_preprocessing_pipeline.sh Musical_Instruments Baby
+```
 
 
 ## 2 Quantization
