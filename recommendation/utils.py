@@ -69,6 +69,7 @@ def load_and_process_config(
     codebook_path_override: str | None = None,
     run_name: str | None = None,
     has_dup_layer_override: bool | None = None,
+    num_semantic_levels_override: int | None = None,
 ) -> dict:
     """
     通用配置加载器 (V6 - 支援 base.yaml 繼承與覆蓋)。
@@ -154,7 +155,13 @@ def load_and_process_config(
 
     # === 4. 根據載入的量化細節，計算詞表參數 ===
     K = int(quant_details['codebook_size'])
-    num_semantic_levels = int(quant_details['num_levels'])
+    num_semantic_levels = (
+        num_semantic_levels_override
+        if num_semantic_levels_override is not None
+        else int(quant_details["num_levels"])
+    )
+    if num_semantic_levels < 1:
+        raise ValueError("num_semantic_levels_override must be positive.")
     has_dup_layer = (
         has_dup_layer_override
         if has_dup_layer_override is not None

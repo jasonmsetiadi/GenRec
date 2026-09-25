@@ -87,6 +87,8 @@ Inference (Beam Search / Prefix-tree / Contrastive Rerank)
 - Python **3.10** (recommended)
 - CUDA 11.8+ (for GPU acceleration)
 - PyTorch, CUDA, and other dependencies will be installed automatically via `requirements.txt`
+- Faiss is installed from the `faiss-cpu` distribution (and remains available as
+  `import faiss` in Python).
 
 ```bash
 git clone https://github.com/yourname/GenRec
@@ -99,6 +101,20 @@ We provide a dedicated submodule for downloading, cleaning, and extracting embed
 
 👉 **See detailed tutorial:**  
 [GenRec-Factory Data Processing & Embedding Guide](./preprocessing/ReadMe.md)
+
+For the documented `Musical_Instruments` text-embedding path, run the complete
+download, preprocessing, embedding, and quantization sequence with:
+
+```bash
+bash run_musical_instruments_pipeline.sh
+```
+
+The runner uses the local `sentence-transformers/sentence-t5-base` model. Set
+`LOCAL_TEXT_MODEL` to use another compatible SentenceTransformer model, such
+as `sentence-transformers/gtr-t5-xl`. Set `INSTALL_DEPS=1` to install
+`requirements.txt` first. Models download from Hugging Face by default; set
+`HF_ENDPOINT` before running the script only when an accessible compatible
+mirror is required.
 
 
 ## 2 Quantization
@@ -151,7 +167,31 @@ python main.py \
   --embedding_modality text \
   --run_name fixed-rqvae
 
-# Variable-length codebook exported as a ragged object array.
+```
+
+Next, create a reproducible variable-length test codebook from the fixed,
+five-level codebook, run:
+
+```bash
+cd ..
+python quantization/truncate_codebook.py \
+  --input datasets/Baby/codebooks/Baby.text.rqvae.npy \
+  --output datasets/Baby/codebooks/Baby.text.rqvae.varlen.npy \
+  --min-length 1 \
+  --max-length 5 \
+  --seed 2023
+```
+
+The utility samples each SID length uniformly, then lengthens colliding
+prefixes until every output SID remains unique. `--sid_num_levels` must equal
+the truncation utility's `--max-length`; all retained token values must fit the
+quantizer's configured codebook size. This is a downstream compatibility test,
+not a learned variable-length quantizer.
+
+Finally, train with the generated variable-length codebook:
+
+```bash
+cd recommendation
 python main.py \
   --model TIGER \
   --dataset Baby \
@@ -159,9 +199,21 @@ python main.py \
   --embedding_modality text \
   --codebook_path ../datasets/Baby/codebooks/Baby.text.rqvae.varlen.npy \
   --no_dedup_layer \
+  --sid_num_levels 5 \
   --run_name varlen-rqvae
 ```
 
-The current quantization scripts generate fixed-length codebooks only. Export
-or generate the ragged variable-length codebook separately before running the
-second command.
+Or run the fixed-versus-variable comparison end-to-end after preprocessing:
+
+```bash
+bash run_fixed_vs_variable_sid.sh
+```
+
+Override the defaults with environment variables, for example:
+
+```bash
+DATASET=Baby MODEL=OneRec EMBEDDING_MODEL=text-embedding-3-large \
+SID_LEVELS=5 bash run_fixed_vs_variable_sid.sh
+```
+
+The script prints elapsed time for each stage and for the complete comparison.

@@ -58,6 +58,12 @@ def main():
         action="store_true",
         help="Declare that the selected codebook has no trailing fixed deduplication level.",
     )
+    parser.add_argument(
+        "--sid_num_levels",
+        type=int,
+        default=None,
+        help="Override the number of SID code levels for an experimental codebook.",
+    )
 
     
     # ✅ (已移除) 删除了 --no_trie 命令行参数
@@ -75,6 +81,7 @@ def main():
         codebook_path_override=args.codebook_path,
         run_name=args.run_name,
         has_dup_layer_override=False if args.no_dedup_layer else None,
+        num_semantic_levels_override=args.sid_num_levels,
     )
     ckpt_override = config['save_path']
     print(f"ckpt_override: {ckpt_override}") 
