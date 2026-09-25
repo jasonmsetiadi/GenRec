@@ -262,12 +262,15 @@ def main():
     args = parser.parse_args()
 
     if args.source == 'amazon':
-        process_amazon(args.dataset, args.data_version, args.output_dir)
+        success = process_amazon(args.dataset, args.data_version, args.output_dir)
     elif args.source == 'movielens':
         valid_ml_datasets = ['ml-1m', 'ml-10m', 'ml-20m']
         if args.dataset not in valid_ml_datasets: print(f"错误: 对于 source='movielens'，--dataset 必须是 {valid_ml_datasets} 中的一个。"); sys.exit(1)
-        process_movielens(args.dataset, args.output_dir)
+        success = process_movielens(args.dataset, args.output_dir)
     else: print(f"错误: 不支持的数据源 '{args.source}'"); sys.exit(1)
+
+    if not success:
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

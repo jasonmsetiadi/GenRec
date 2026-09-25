@@ -42,6 +42,11 @@ def load_yaml_file(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
     
+def _safe_model_tag(model_name: str) -> str:
+    """Match preprocessing's embedding filename convention for model identifiers."""
+    return str(model_name).split('/')[-1].replace('/', '-').replace('\\', '-')
+
+
 def setup_paths(args):
     """根据输入参数构建路径 (自动处理单模态和多模态)"""
     emb_dir = os.path.join(args.data_base_path, args.dataset_name, "embeddings")
@@ -63,12 +68,14 @@ def setup_paths(args):
         image_modality_name = 'image' # 或者 'fused'，取决于您的文件名约定
         
         # 使用指定的模型名称构建路径
-        embedding_filename_T = f"{args.dataset_name}.emb-{text_modality_name}-{args.text_embedding_model}.npy"
+        text_model_tag = _safe_model_tag(args.text_embedding_model)
+        image_model_tag = _safe_model_tag(args.image_embedding_model)
+        embedding_filename_T = f"{args.dataset_name}.emb-{text_modality_name}-{text_model_tag}.npy"
         embedding_path_T = os.path.join(emb_dir, embedding_filename_T)
         
-        embedding_filename_I = f"{args.dataset_name}.emb-{image_modality_name}-{args.image_embedding_model}.npy"
+        embedding_filename_I = f"{args.dataset_name}.emb-{image_modality_name}-{image_model_tag}.npy"
         # 尝试 fused 命名（如果 image 不存在）
-        embedding_path_I_alt = os.path.join(emb_dir, f"{args.dataset_name}.emb-fused-{args.image_embedding_model}.npy")
+        embedding_path_I_alt = os.path.join(emb_dir, f"{args.dataset_name}.emb-fused-{image_model_tag}.npy")
         embedding_path_I = os.path.join(emb_dir, embedding_filename_I)
         
         # 检查图像/融合文件是否存在
@@ -82,7 +89,7 @@ def setup_paths(args):
         embedding_path = (embedding_path_T, embedding_path_I)
         
         # 输出目录：包含两个来源模型，更清晰
-        output_base_dir = f"{args.model_name}/{args.text_embedding_model}+{args.image_embedding_model}" 
+        output_base_dir = f"{args.model_name}/{text_model_tag}+{image_model_tag}"
 
     else:
         # --- 单模态路径逻辑 ---
@@ -92,11 +99,12 @@ def setup_paths(args):
         if not args.embedding_model:
              raise ValueError("错误：对于单模态模型，必须提供 '--embedding_model' 参数。")
              
-        embedding_filename = f"{args.dataset_name}.emb-{args.embedding_modality}-{args.embedding_model}.npy"
+        embedding_model_tag = _safe_model_tag(args.embedding_model)
+        embedding_filename = f"{args.dataset_name}.emb-{args.embedding_modality}-{embedding_model_tag}.npy"
         embedding_path = os.path.join(emb_dir, embedding_filename)
         
         # 输出目录
-        output_base_dir = f"{args.model_name}/{args.embedding_modality}-{args.embedding_model}"
+        output_base_dir = f"{args.model_name}/{args.embedding_modality}-{embedding_model_tag}"
 
     # --- 共享的输出路径构建 ---
     log_dir = os.path.join(args.log_base_path, args.dataset_name, output_base_dir)
